@@ -1,226 +1,72 @@
 /**
  * Google Meet Subtitle Extractor
  * 
- * This extension extracts and displays Google Meet subtitles in the console,
- * using persistent storage to track and display only new content.
+ * This extension extracts and displays Google Meet subtitles in the console with
+ * guaranteed phrase separation.
  */
 
-// Database to store subtitle information
-class SubtitleDatabase {
-  constructor() {
-    // Current raw subtitle text from Google Meet
-    this.currentText = '';
-    
-    // Last time subtitles were updated
-    this.lastUpdateTime = Date.now();
-    
-    // Complete history of subtitles for the current session
-    this.subtitleHistory = [];
-    
-    // Current phrase being built
-    this.currentPhrase = '';
-    
-    // All phrases that have been detected
-    this.phrases = [];
-    
-    // Words that have already been output to console
-    this.outputWords = new Set();
-    
-    // Flag to indicate if we're starting a new phrase
-    this.isNewPhrase = true;
-  }
-  
-  // Reset the database for a new session
-  reset() {
-    this.currentText = '';
-    this.lastUpdateTime = Date.now();
-    this.subtitleHistory = [];
-    this.currentPhrase = '';
-    this.phrases = [];
-    this.outputWords = new Set();
-    this.isNewPhrase = true;
-  }
-  
-  // Add a new subtitle and get what should be output
-  processSubtitle(text) {
-    // If the text is the same, just update the timestamp
-    if (text === this.currentText) {
-      this.lastUpdateTime = Date.now();
-      return null;
-    }
-    
-    // Add to history
-    this.subtitleHistory.push({
-      text: text,
-      timestamp: Date.now()
-    });
-    
-    // Determine what to output
-    let outputText = null;
-    
-    // If this is a new phrase after a pause
-    if (this.isNewPhrase) {
-      // Start a new phrase with the full text
-      this.currentPhrase = text;
-      outputText = text;
-      this.isNewPhrase = false;
-      
-      // Add all words to the output set
-      this.addWordsToOutputSet(text);
-    } 
-    // If this is a continuation of the current phrase
-    else {
-      // Find the new words that haven't been output yet
-      outputText = this.findNewWords(text);
-      
-      // Update the current phrase
-      this.currentPhrase = text;
-    }
-    
-    // Update the current text and timestamp
-    this.currentText = text;
-    this.lastUpdateTime = Date.now();
-    
-    return outputText;
-  }
-  
-  // Check if enough time has passed to consider the next subtitle a new phrase
-  checkForNewPhrase(threshold) {
-    const currentTime = Date.now();
-    if (this.currentText && (currentTime - this.lastUpdateTime > threshold)) {
-      // If we have a current phrase, add it to the phrases list
-      if (this.currentPhrase) {
-        this.phrases.push(this.currentPhrase);
-      }
-      
-      // Mark that the next subtitle will be a new phrase
-      this.isNewPhrase = true;
-      return true;
-    }
-    return false;
-  }
-  
-  // Add all words in a text to the output set
-  addWordsToOutputSet(text) {
-    // Split the text into words and add each to the set
-    const words = this.splitIntoWords(text);
-    for (const word of words) {
-      if (word.trim()) {
-        this.outputWords.add(word.trim().toLowerCase());
-      }
-    }
-  }
-  
-  // Split text into words
-  splitIntoWords(text) {
-    // Split by spaces, but keep punctuation with words
-    return text.split(/\s+/);
-  }
-  
-  // Find new words in the text that haven't been output yet
-  findNewWords(text) {
-    // If the current phrase is empty, return the full text
-    if (!this.currentPhrase) {
-      return text;
-    }
-    
-    // If the text starts with the current phrase, it's a simple continuation
-    if (text.startsWith(this.currentPhrase)) {
-      const newPart = text.substring(this.currentPhrase.length).trim();
-      if (newPart) {
-        this.addWordsToOutputSet(newPart);
-        return newPart;
-      }
-      return null;
-    }
-    
-    // Try to find words that haven't been output yet
-    const words = this.splitIntoWords(text);
-    const newWords = [];
-    
-    for (const word of words) {
-      const cleanWord = word.trim().toLowerCase();
-      if (cleanWord && !this.outputWords.has(cleanWord)) {
-        newWords.push(word);
-        this.outputWords.add(cleanWord);
-      }
-    }
-    
-    // If we found new words, join them and return
-    if (newWords.length > 0) {
-      return newWords.join(' ');
-    }
-    
-    // If we couldn't find new words but the text is different,
-    // something changed that we couldn't detect precisely
-    if (text !== this.currentPhrase) {
-      // Try to find the point where the texts diverge
-      let i = 0;
-      while (i < Math.min(text.length, this.currentPhrase.length) && 
-             text.charAt(i) === this.currentPhrase.charAt(i)) {
-        i++;
-      }
-      
-      // If we found a divergence point, extract from there
-      if (i < text.length) {
-        // Find the start of the word where divergence occurs
-        while (i > 0 && text.charAt(i - 1) !== ' ') {
-          i--;
-        }
-        
-        const newPart = text.substring(i).trim();
-        if (newPart) {
-          this.addWordsToOutputSet(newPart);
-          return newPart;
-        }
-      }
-    }
-    
-    return null;
-  }
-}
+// Configuration
+const DEBUG_MODE = true;           // Enable debug logging
+const NO_CHANGE_LIMIT = 5;        // Number of stable updates before considering a new phrase
+const MIN_CHANGE_LENGTH = 10;     // Minimum length of change to force a new phrase
 
-// Create the subtitle database
-const subtitleDB = new SubtitleDatabase();
+// Tracking variables
+let lastText = '';                // Last subtitle text seen
+let lastDisplayedText = '';      // Last text that was output to console
+let noChangeCount = 0;           // Counter for times text hasn't changed
+let sentenceEndDetected = false; // Flag for detecting sentence endings (periods, etc)
 
-// The time threshold (in ms) to consider a new phrase has started
-const NEW_PHRASE_THRESHOLD = 2000;
-
-/**
- * Initializes the subtitle observer
- */
-function initSubtitleObserver() {
-  console.log('Google Meet Subtitle Extractor initialized');
+// Debug logging function
+function debugLog(message, type = 'info') {
+  if (!DEBUG_MODE) return;
   
-  // Reset the database
-  subtitleDB.reset();
+  let style = 'font-weight: bold;';
   
-  // Create a mutation observer to detect when subtitles appear
-  const observer = new MutationObserver(() => {
-    checkForSubtitles();
-  });
-
-  // Start observing the document for subtitle container changes
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
-
-  // Check periodically for subtitles
-  setInterval(checkForSubtitles, 300);
+  switch (type) {
+    case 'error':
+      style += 'color: red;';
+      break;
+    case 'warning':
+      style += 'color: orange;';
+      break;
+    case 'success':
+      style += 'color: green;';
+      break;
+    case 'info':
+    default:
+      style += 'color: blue;';
+      break;
+  }
   
-  // Check for speech pauses to detect new phrases
-  setInterval(() => {
-    subtitleDB.checkForNewPhrase(NEW_PHRASE_THRESHOLD);
-  }, 500);
+  console.log(`%c[DEBUG] ${message}`, style);
 }
 
 /**
- * Checks for subtitle elements and processes them
+ * Initialize the subtitle extraction
  */
-function checkForSubtitles() {
-  // Try multiple selectors to find subtitle elements
-  const subtitleSelectors = [
+function init() {
+  // Reset tracking variables
+  lastText = '';
+  lastDisplayedText = '';
+  noChangeCount = 0;
+  sentenceEndDetected = false;
+  
+  debugLog('Subtitle Extractor Initialized - MANUAL PHRASE SEPARATION MODE', 'success');
+  
+  // Set up mutation observer to detect subtitle changes
+  const observer = new MutationObserver(findSubtitles);
+  observer.observe(document.body, { childList: true, subtree: true });
+  
+  // Look for subtitles periodically
+  setInterval(findSubtitles, 300);
+}
+
+/**
+ * Find subtitle elements in the page
+ */
+function findSubtitles() {
+  // List of possible selectors for Google Meet subtitle elements
+  const selectors = [
     '[jsname="tgaKEf"]',          // Primary selector
     '.VIpgJd-yAWNEb-VIpgJd-fmcmS',   // Alternative selector
     '.CNusmb',                      // Another alternative
@@ -229,47 +75,160 @@ function checkForSubtitles() {
     '[jscontroller="QEg9te"]'     // Controller-based selector
   ];
   
-  // Try each selector until we find subtitle elements
-  for (const selector of subtitleSelectors) {
+  // Try each selector until we find subtitles
+  for (const selector of selectors) {
     const elements = document.querySelectorAll(selector);
     if (elements.length > 0) {
-      processSubtitleElements(elements);
-      break; // Stop once we've found and processed elements
+      // Process each subtitle element we found
+      for (const element of elements) {
+        if (element && element.textContent) {
+          const text = element.textContent.trim();
+          if (text) {
+            processSubtitle(text);
+          }
+        }
+      }
+      return; // Stop once we've processed elements
     }
   }
 }
 
 /**
- * Processes subtitle elements and extracts their text
- * @param {NodeList} elements - The subtitle elements
+ * Process a subtitle text update
  */
-function processSubtitleElements(elements) {
-  for (const element of elements) {
-    if (element && element.textContent) {
-      const text = element.textContent.trim();
+function processSubtitle(text) {
+  // Skip if text is identical to what we've already seen
+  if (text === lastText) {
+    // Count consecutive times with no change
+    noChangeCount++;
+    
+    // If text hasn't changed for a while, this could be the end of a phrase
+    if (noChangeCount >= NO_CHANGE_LIMIT) {
+      // Only log occasionally to avoid spam
+      if (noChangeCount === NO_CHANGE_LIMIT || noChangeCount % 10 === 0) {
+        debugLog(`Text stable for ${noChangeCount} checks: '${text}'`, 'warning');
+      }
       
-      // Skip empty subtitles
-      if (!text) continue;
-      
-      // Process the subtitle text and output if there's something new
-      const outputText = subtitleDB.processSubtitle(text);
-      if (outputText) {
-        console.log(outputText);
+      // After significant stability, consider the current phrase complete
+      if (!sentenceEndDetected && text.match(/[.!?]\s*$/)) {
+        sentenceEndDetected = true;
+        debugLog('Sentence ending detected!', 'error');
       }
     }
+    return;
+  }
+  
+  // Text has changed, reset the no-change counter
+  noChangeCount = 0;
+  
+  // Log what changed
+  if (lastText) {
+    // Check what kind of change happened
+    if (text.startsWith(lastText)) {
+      // Text grew (normal case during speech)
+      debugLog(`Text extended: '${lastText}' → '${text}'`, 'success');
+    } else if (lastText.startsWith(text)) {
+      // Text shortened (unusual)
+      debugLog(`Text shortened: '${lastText}' → '${text}'`, 'warning');
+    } else {
+      // Text completely changed (likely a new phrase)
+      debugLog(`Text changed completely: '${lastText}' → '${text}'`, 'error');
+      sentenceEndDetected = true;
+    }
+  } else {
+    // First text we've seen
+    debugLog(`Initial text: '${text}'`, 'success');
+  }
+  
+  // Check for large changes that suggest a new phrase
+  if (lastText && text.length > lastText.length + MIN_CHANGE_LENGTH) {
+    debugLog(`Large text addition detected (+${text.length - lastText.length} chars)`, 'warning');
+  }
+  
+  // Update our tracking variables
+  const needsDisplay = shouldDisplayNewText(text);
+  lastText = text;
+  
+  // Display the subtitle if needed
+  if (needsDisplay) {
+    displaySubtitle(text);
   }
 }
 
-// Initialize the extension when the page is loaded
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initSubtitleObserver);
-} else {
-  initSubtitleObserver();
+/**
+ * Determine if we should display this text as a new phrase
+ */
+function shouldDisplayNewText(text) {
+  // If no previous display, always show this one
+  if (!lastDisplayedText) {
+    return true;
+  }
+  
+  // If text is identical to last displayed, skip it
+  if (text === lastDisplayedText) {
+    return false;
+  }
+  
+  // If we detected a sentence ending or a completely new phrase has started
+  if (sentenceEndDetected) {
+    return true;
+  }
+  
+  // Text has grown since last display - only show if significant change
+  if (text.startsWith(lastDisplayedText)) {
+    // Show if text has grown by at least 5 characters
+    return (text.length >= lastDisplayedText.length + 5);
+  }
+  
+  // Always show if text has changed completely
+  return true;
 }
 
-// Initialize the extension when the page is loaded
+/**
+ * Display a subtitle phrase in the console
+ */
+function displaySubtitle(text) {
+  // Extract just the new content if this is an update to previous phrase
+  let outputText = text;
+  
+  // If text is a continuation and not a new phrase
+  if (!sentenceEndDetected && lastDisplayedText && text.startsWith(lastDisplayedText)) {
+    // We're just updating the current phrase - show full text
+    debugLog('Updating current phrase', 'info');
+  } 
+  // If this is a new phrase after a sentence end
+  else if (sentenceEndDetected) {
+    // Add a separator for the new phrase
+    console.log('');
+    console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ NEW PHRASE ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
+    console.log('');
+    
+    debugLog('New phrase started', 'success');
+    
+    // Try to extract just the new part after the previous phrase
+    if (lastDisplayedText && text.startsWith(lastDisplayedText)) {
+      outputText = text.substring(lastDisplayedText.length).trim();
+      if (outputText) {
+        debugLog(`Extracted new content: '${outputText}'`, 'success');
+      } else {
+        outputText = text;
+      }
+    }
+    
+    // Reset the sentence end detector
+    sentenceEndDetected = false;
+  }
+  
+  // Output the text
+  console.log(outputText);
+  
+  // Update last displayed text
+  lastDisplayedText = text;
+}
+
+// Initialize the extension
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initSubtitleObserver);
+  document.addEventListener('DOMContentLoaded', init);
 } else {
-  initSubtitleObserver();
+  init();
 }

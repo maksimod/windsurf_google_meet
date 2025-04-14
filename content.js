@@ -2,23 +2,20 @@
  * Google Meet Subtitle Extractor
  * 
  * This extension extracts and displays Google Meet subtitles in the console,
- * separating them into phrases according to the specified requirements.
+ * only showing the difference between updates and separating phrases when speech pauses.
  */
 
-// Store the last displayed subtitle to avoid duplicates
-let lastSubtitle = '';
-// Store the timestamp of the last subtitle to determine if it's a continuation
-let lastSubtitleTime = 0;
-// Store the timestamp of the last activity to detect new phrases
-let lastActivityTime = 0;
-// The time threshold (in ms) to consider a subtitle as a continuation
-const CONTINUATION_THRESHOLD = 1500;
+// Store the previous subtitle text
+let previousText = '';
+
+// Store the timestamp of the last subtitle update
+let lastUpdateTime = 0;
+
 // The time threshold (in ms) to consider a new phrase has started
-const NEW_PHRASE_THRESHOLD = 3000;
-// Flag to track if we're in an active speech segment
-let activeSpeech = false;
-// Store the current speaker's phrases
-let currentSpeakerPhrases = [];
+const NEW_PHRASE_THRESHOLD = 2000;
+
+// Flag to track if we're in a new phrase (after a pause)
+let isNewPhrase = true;
 
 /**
  * Initializes the subtitle observer
@@ -27,12 +24,8 @@ function initSubtitleObserver() {
   console.log('Google Meet Subtitle Extractor initialized');
   
   // Create a mutation observer to detect when subtitles appear
-  const observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-        checkForSubtitles();
-      }
-    }
+  const observer = new MutationObserver(() => {
+    checkForSubtitles();
   });
 
   // Start observing the document for subtitle container changes
@@ -41,25 +34,23 @@ function initSubtitleObserver() {
     subtree: true
   });
 
-  // Also check periodically in case we miss some mutations
-  setInterval(checkForSubtitles, 500);
+  // Check periodically for subtitles
+  setInterval(checkForSubtitles, 300);
   
   // Check for speech pauses to detect new phrases
-  setInterval(checkForNewPhrase, 1000);
+  setInterval(checkForSpeechPause, 500);
 }
 
 /**
- * Checks if enough time has passed to consider the current speech as finished
- * and a new phrase is starting
+ * Checks if enough time has passed since the last subtitle update
+ * to consider the next subtitle as a new phrase
  */
-function checkForNewPhrase() {
+function checkForSpeechPause() {
   const currentTime = Date.now();
   
-  // If we have an active speech and enough time has passed since the last activity,
-  // consider this as the end of a phrase
-  if (activeSpeech && (currentTime - lastActivityTime > NEW_PHRASE_THRESHOLD)) {
-    activeSpeech = false;
-    currentSpeakerPhrases = [];
+  // If enough time has passed since the last update, mark the next subtitle as a new phrase
+  if (previousText && (currentTime - lastUpdateTime > NEW_PHRASE_THRESHOLD)) {
+    isNewPhrase = true;
   }
 }
 
@@ -67,12 +58,23 @@ function checkForNewPhrase() {
  * Checks for subtitle elements and processes them
  */
 function checkForSubtitles() {
-  // Google Meet subtitles are typically in elements with specific attributes
-  // This selector might need adjustment based on Google Meet's current DOM structure
-  const subtitleElements = document.querySelectorAll('[jsname="tgaKEf"], .VIpgJd-yAWNEb-VIpgJd-fmcmS, .CNusmb');
+  // Try multiple selectors to find subtitle elements
+  const subtitleSelectors = [
+    '[jsname="tgaKEf"]',          // Primary selector
+    '.VIpgJd-yAWNEb-VIpgJd-fmcmS',   // Alternative selector
+    '.CNusmb',                      // Another alternative
+    '.a4cQT',                       // Additional selector
+    '.TBMuR',                       // Another possible selector
+    '[jscontroller="QEg9te"]'     // Controller-based selector
+  ];
   
-  if (subtitleElements.length > 0) {
-    processSubtitleElements(subtitleElements);
+  // Try each selector until we find subtitle elements
+  for (const selector of subtitleSelectors) {
+    const elements = document.querySelectorAll(selector);
+    if (elements.length > 0) {
+      processSubtitleElements(elements);
+      break; // Stop once we've found and processed elements
+    }
   }
 }
 
@@ -83,76 +85,53 @@ function checkForSubtitles() {
 function processSubtitleElements(elements) {
   for (const element of elements) {
     if (element && element.textContent) {
-      const currentText = element.textContent.trim();
+      const text = element.textContent.trim();
       
       // Skip empty subtitles
-      if (!currentText) continue;
+      if (!text) continue;
       
-      // Process the subtitle
-      processSubtitle(currentText);
+      // Process the subtitle text
+      processSubtitle(text);
     }
   }
 }
 
 /**
- * Determines if the current subtitle is likely from a new speaker
- * @param {string} subtitle - The current subtitle text
- * @returns {boolean} - True if it's likely a new speaker
+ * Processes a subtitle and outputs only the difference from the previous subtitle
+ * @param {string} text - The subtitle text
  */
-function isLikelyNewSpeaker(subtitle) {
-  // If we have no previous phrases, it's a new speaker
-  if (currentSpeakerPhrases.length === 0) return true;
-  
-  // If the new subtitle doesn't contain any part of the previous phrases,
-  // it's likely a new speaker
-  for (const phrase of currentSpeakerPhrases) {
-    if (subtitle.includes(phrase)) return false;
-  }
-  
-  return true;
-}
-
-/**
- * Processes a subtitle and decides whether to display it as a new phrase or continuation
- * @param {string} subtitle - The subtitle text
- */
-function processSubtitle(subtitle) {
+function processSubtitle(text) {
   const currentTime = Date.now();
   
-  // If this is exactly the same as the last subtitle, just update the timestamp
-  if (subtitle === lastSubtitle) {
-    lastActivityTime = currentTime;
+  // If this is exactly the same as before, just update the timestamp and skip output
+  if (text === previousText) {
+    lastUpdateTime = currentTime;
     return;
   }
   
-  // Check if this is a continuation of the previous subtitle
-  const isContinuation = subtitle.startsWith(lastSubtitle) && 
-                         (currentTime - lastSubtitleTime < CONTINUATION_THRESHOLD);
-  
-  // Check if we should start a new phrase based on timing and content
-  const isNewPhrase = !activeSpeech || 
-                     (currentTime - lastActivityTime > NEW_PHRASE_THRESHOLD) || 
-                     isLikelyNewSpeaker(subtitle);
-  
-  // If it's a new phrase, print a blank line to separate it visually
-  if (isNewPhrase && lastSubtitle) {
-    console.log('');
-    currentSpeakerPhrases = [];
+  // If this is a new phrase (after a pause)
+  if (isNewPhrase) {
+    // Output the entire text as a new phrase
+    console.log(text);
+    isNewPhrase = false;
+  } 
+  // If this is a continuation of the previous text
+  else if (previousText && text.startsWith(previousText)) {
+    // Only output the difference (what was added)
+    const difference = text.substring(previousText.length);
+    if (difference.trim()) {
+      console.log(difference);
+    }
   }
-  
-  // Output the subtitle to the console without any empty lines between continuations
-  console.log(subtitle);
+  // If this is a completely different text (not a continuation)
+  else {
+    // Output the entire text
+    console.log(text);
+  }
   
   // Update tracking variables
-  lastSubtitle = subtitle;
-  lastSubtitleTime = currentTime;
-  lastActivityTime = currentTime;
-  activeSpeech = true;
-  
-  // Keep track of this phrase for the current speaker
-  if (!currentSpeakerPhrases.includes(subtitle)) {
-    currentSpeakerPhrases.push(subtitle);
-  }
+  previousText = text;
+  lastUpdateTime = currentTime;
 }
 
 // Initialize the extension when the page is loaded

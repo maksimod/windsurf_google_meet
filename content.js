@@ -6,9 +6,10 @@
  */
 
 // Конфигурация
-const DEBUG_MODE = true;            // Включить режим отладки
+const DEBUG_MODE = false;           // Выключить режим отладки
 const PHRASE_TIME_THRESHOLD = 2;    // Порог времени в секундах для определения новой фразы
 const MIN_DIFF_LENGTH = 3;          // Минимальная длина изменения для обработки
+const COMPACT_SEPARATOR = true;     // Компактный разделитель между фразами
 
 // База данных для хранения субтитров
 const subtitleDB = {
@@ -205,9 +206,13 @@ function processSubtitle(currentText) {
       subtitleDB.lastPhraseStart = updateTime;
       
       // Выводим разделитель для новых фраз
-      console.log('');
-      console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
-      console.log('');
+      if (COMPACT_SEPARATOR) {
+        console.log('▃▃▃ НОВАЯ ФРАЗА ▃▃▃');
+      } else {
+        console.log('');
+        console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
+        console.log('');
+      }
       console.log(subtitleDB.currentPhrase);
     }
   } else {
@@ -227,9 +232,13 @@ function processSubtitle(currentText) {
     subtitleDB.lastPhraseStart = updateTime;
     
     // Выводим разделитель для новых фраз
-    console.log('');
-    console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
-    console.log('');
+    if (COMPACT_SEPARATOR) {
+      console.log('▃▃▃ НОВАЯ ФРАЗА ▃▃▃');
+    } else {
+      console.log('');
+      console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
+      console.log('');
+    }
     console.log(subtitleDB.currentPhrase);
   }
   

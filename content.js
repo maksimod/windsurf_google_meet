@@ -1,22 +1,27 @@
 /**
  * Google Meet Subtitle Extractor
  * 
- * This extension extracts and displays Google Meet subtitles in the console with
- * guaranteed phrase separation.
+ * Это расширение извлекает и отображает субтитры Google Meet в консоли с
+ * интеллектуальным разделением на фразы.
  */
 
-// Configuration
-const DEBUG_MODE = true;           // Enable debug logging
-const NO_CHANGE_LIMIT = 5;        // Number of stable updates before considering a new phrase
-const MIN_CHANGE_LENGTH = 10;     // Minimum length of change to force a new phrase
+// Конфигурация
+const DEBUG_MODE = true;            // Включить режим отладки
+const PHRASE_TIME_THRESHOLD = 2;    // Порог времени в секундах для определения новой фразы
+const MIN_DIFF_LENGTH = 3;          // Минимальная длина изменения для обработки
 
-// Tracking variables
-let lastText = '';                // Last subtitle text seen
-let lastDisplayedText = '';      // Last text that was output to console
-let noChangeCount = 0;           // Counter for times text hasn't changed
-let sentenceEndDetected = false; // Flag for detecting sentence endings (periods, etc)
+// База данных для хранения субтитров
+const subtitleDB = {
+  fullText: "",            // Полный текст субтитров
+  lastUpdateTime: 0,       // Время последнего обновления
+  currentPhrase: "",       // Текущая фраза, накапливаемая для вывода
+  phraseHistory: [],       // История фраз для отладки
+  lastPhraseStart: 0       // Время начала текущей фразы
+};
 
-// Debug logging function
+/**
+ * Функция вывода отладочной информации
+ */
 function debugLog(message, type = 'info') {
   if (!DEBUG_MODE) return;
   
@@ -42,44 +47,110 @@ function debugLog(message, type = 'info') {
 }
 
 /**
- * Initialize the subtitle extraction
+ * Находит различия между двумя текстами
+ * @param {string} oldText - Старый текст
+ * @param {string} newText - Новый текст
+ * @returns {string} - Текст, добавленный в новой версии
+ */
+function findTextDiff(oldText, newText) {
+  if (!oldText) return newText;
+  
+  // Пытаемся найти точное добавление в конец
+  if (newText.startsWith(oldText)) {
+    return newText.slice(oldText.length);
+  }
+  
+  // Более сложная ситуация - ищем наибольшее общее начало
+  let commonPrefixLength = 0;
+  const minLength = Math.min(oldText.length, newText.length);
+  
+  for (let i = 0; i < minLength; i++) {
+    if (oldText[i] === newText[i]) {
+      commonPrefixLength++;
+    } else {
+      break;
+    }
+  }
+  
+  // Если нашли общее начало, возвращаем разницу
+  if (commonPrefixLength > 0) {
+    return newText.slice(commonPrefixLength);
+  }
+  
+  // Если не нашли общего начала, это может быть полная замена
+  return newText;
+}
+
+/**
+ * Очищает повторяющиеся фрагменты текста
+ * @param {string} text - Текст для очистки
+ * @returns {string} - Очищенный текст
+ */
+function cleanDuplicates(text) {
+  // Простая очистка для небольших фрагментов
+  const words = text.split(/\s+/);
+  if (words.length <= 3) return text;
+  
+  // Проверяем повторяющиеся 3-словные последовательности
+  const cleaned = [];
+  for (let i = 0; i < words.length; i++) {
+    if (i + 3 <= words.length) {
+      const chunk = words.slice(i, i + 3).join(' ');
+      const remaining = words.slice(i + 3).join(' ');
+      
+      if (remaining.includes(chunk)) {
+        // Пропускаем этот фрагмент, так как он повторяется дальше
+        i += 2;
+        continue;
+      }
+    }
+    
+    cleaned.push(words[i]);
+  }
+  
+  return cleaned.join(' ');
+}
+
+/**
+ * Инициализация обнаружения субтитров
  */
 function init() {
-  // Reset tracking variables
-  lastText = '';
-  lastDisplayedText = '';
-  noChangeCount = 0;
-  sentenceEndDetected = false;
+  // Сбрасываем базу данных
+  subtitleDB.fullText = "";
+  subtitleDB.lastUpdateTime = Date.now();
+  subtitleDB.currentPhrase = "";
+  subtitleDB.phraseHistory = [];
+  subtitleDB.lastPhraseStart = Date.now();
   
-  debugLog('Subtitle Extractor Initialized - MANUAL PHRASE SEPARATION MODE', 'success');
+  debugLog('Обнаружение субтитров инициализировано - АКТИВИРОВАН РЕЖИМ ИНТЕЛЛЕКТУАЛЬНОГО РАЗДЕЛЕНИЯ ФРАЗ', 'success');
   
-  // Set up mutation observer to detect subtitle changes
+  // Настраиваем наблюдатель для обнаружения изменений в DOM
   const observer = new MutationObserver(findSubtitles);
   observer.observe(document.body, { childList: true, subtree: true });
   
-  // Look for subtitles periodically
+  // Ищем субтитры периодически
   setInterval(findSubtitles, 300);
 }
 
 /**
- * Find subtitle elements in the page
+ * Находит элементы с субтитрами на странице
  */
 function findSubtitles() {
-  // List of possible selectors for Google Meet subtitle elements
+  // Список возможных селекторов для элементов субтитров Google Meet
   const selectors = [
-    '[jsname="tgaKEf"]',          // Primary selector
-    '.VIpgJd-yAWNEb-VIpgJd-fmcmS',   // Alternative selector
-    '.CNusmb',                      // Another alternative
-    '.a4cQT',                       // Additional selector
-    '.TBMuR',                       // Another possible selector
-    '[jscontroller="QEg9te"]'     // Controller-based selector
+    '[jsname="tgaKEf"]',             // Основной селектор
+    '.VIpgJd-yAWNEb-VIpgJd-fmcmS',   // Альтернативный селектор
+    '.CNusmb',                       // Еще один альтернативный
+    '.a4cQT',                        // Дополнительный селектор
+    '.TBMuR',                        // Еще один возможный селектор
+    '[jscontroller="QEg9te"]'        // Селектор на основе контроллера
   ];
   
-  // Try each selector until we find subtitles
+  // Перебираем селекторы, пока не найдем субтитры
   for (const selector of selectors) {
     const elements = document.querySelectorAll(selector);
     if (elements.length > 0) {
-      // Process each subtitle element we found
+      // Обрабатываем каждый найденный элемент с субтитрами
       for (const element of elements) {
         if (element && element.textContent) {
           const text = element.textContent.trim();
@@ -88,145 +159,86 @@ function findSubtitles() {
           }
         }
       }
-      return; // Stop once we've processed elements
+      return; // Останавливаемся после обработки элементов
     }
   }
 }
 
 /**
- * Process a subtitle text update
+ * Обработка обновления текста субтитров
+ * @param {string} currentText - Текущий полный текст субтитров
  */
-function processSubtitle(text) {
-  // Skip if text is identical to what we've already seen
-  if (text === lastText) {
-    // Count consecutive times with no change
-    noChangeCount++;
-    
-    // If text hasn't changed for a while, this could be the end of a phrase
-    if (noChangeCount >= NO_CHANGE_LIMIT) {
-      // Only log occasionally to avoid spam
-      if (noChangeCount === NO_CHANGE_LIMIT || noChangeCount % 10 === 0) {
-        debugLog(`Text stable for ${noChangeCount} checks: '${text}'`, 'warning');
-      }
+function processSubtitle(currentText) {
+  // Пропускаем, если текст идентичен последнему
+  if (currentText === subtitleDB.fullText) return;
+  
+  // Текущее время
+  const updateTime = Date.now();
+  
+  // Вычисляем время с момента последнего обновления (в секундах)
+  const deltaTime = (updateTime - subtitleDB.lastUpdateTime) / 1000;
+  
+  // Определяем разницу в тексте
+  const diffText = findTextDiff(subtitleDB.fullText, currentText);
+  
+  // Очищаем потенциальные дубликаты
+  const cleanedDiff = cleanDuplicates(diffText);
+  
+  // Если разница пустая или только пробелы, пропускаем это обновление
+  if (!cleanedDiff.trim()) return;
+  
+  debugLog(`Обнаружено изменение через ${deltaTime.toFixed(2)}с: '${cleanedDiff}'`, 
+           deltaTime < PHRASE_TIME_THRESHOLD ? "success" : "warning");
+  
+  // Определяем, является ли это продолжением или новой фразой
+  if (deltaTime < PHRASE_TIME_THRESHOLD) {
+    // Продолжаем текущую фразу
+    if (subtitleDB.currentPhrase) {
+      // Добавляем новый контент к текущей фразе
+      subtitleDB.currentPhrase += cleanedDiff;
       
-      // After significant stability, consider the current phrase complete
-      if (!sentenceEndDetected && text.match(/[.!?]\s*$/)) {
-        sentenceEndDetected = true;
-        debugLog('Sentence ending detected!', 'error');
-      }
-    }
-    return;
-  }
-  
-  // Text has changed, reset the no-change counter
-  noChangeCount = 0;
-  
-  // Log what changed
-  if (lastText) {
-    // Check what kind of change happened
-    if (text.startsWith(lastText)) {
-      // Text grew (normal case during speech)
-      debugLog(`Text extended: '${lastText}' → '${text}'`, 'success');
-    } else if (lastText.startsWith(text)) {
-      // Text shortened (unusual)
-      debugLog(`Text shortened: '${lastText}' → '${text}'`, 'warning');
+      // Выводим ТОЛЬКО текущую фразу, не весь текст
+      console.log(subtitleDB.currentPhrase);
     } else {
-      // Text completely changed (likely a new phrase)
-      debugLog(`Text changed completely: '${lastText}' → '${text}'`, 'error');
-      sentenceEndDetected = true;
+      // Если текущей фразы нет, начинаем новую
+      subtitleDB.currentPhrase = cleanedDiff;
+      subtitleDB.lastPhraseStart = updateTime;
+      
+      // Выводим разделитель для новых фраз
+      console.log('');
+      console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
+      console.log('');
+      console.log(subtitleDB.currentPhrase);
     }
   } else {
-    // First text we've seen
-    debugLog(`Initial text: '${text}'`, 'success');
-  }
-  
-  // Check for large changes that suggest a new phrase
-  if (lastText && text.length > lastText.length + MIN_CHANGE_LENGTH) {
-    debugLog(`Large text addition detected (+${text.length - lastText.length} chars)`, 'warning');
-  }
-  
-  // Update our tracking variables
-  const needsDisplay = shouldDisplayNewText(text);
-  lastText = text;
-  
-  // Display the subtitle if needed
-  if (needsDisplay) {
-    displaySubtitle(text);
-  }
-}
-
-/**
- * Determine if we should display this text as a new phrase
- */
-function shouldDisplayNewText(text) {
-  // If no previous display, always show this one
-  if (!lastDisplayedText) {
-    return true;
-  }
-  
-  // If text is identical to last displayed, skip it
-  if (text === lastDisplayedText) {
-    return false;
-  }
-  
-  // If we detected a sentence ending or a completely new phrase has started
-  if (sentenceEndDetected) {
-    return true;
-  }
-  
-  // Text has grown since last display - only show if significant change
-  if (text.startsWith(lastDisplayedText)) {
-    // Show if text has grown by at least 5 characters
-    return (text.length >= lastDisplayedText.length + 5);
-  }
-  
-  // Always show if text has changed completely
-  return true;
-}
-
-/**
- * Display a subtitle phrase in the console
- */
-function displaySubtitle(text) {
-  // Extract just the new content if this is an update to previous phrase
-  let outputText = text;
-  
-  // If text is a continuation and not a new phrase
-  if (!sentenceEndDetected && lastDisplayedText && text.startsWith(lastDisplayedText)) {
-    // We're just updating the current phrase - show full text
-    debugLog('Updating current phrase', 'info');
-  } 
-  // If this is a new phrase after a sentence end
-  else if (sentenceEndDetected) {
-    // Add a separator for the new phrase
-    console.log('');
-    console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ NEW PHRASE ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
-    console.log('');
+    // Обнаружен временной разрыв - это новая фраза
     
-    debugLog('New phrase started', 'success');
-    
-    // Try to extract just the new part after the previous phrase
-    if (lastDisplayedText && text.startsWith(lastDisplayedText)) {
-      outputText = text.substring(lastDisplayedText.length).trim();
-      if (outputText) {
-        debugLog(`Extracted new content: '${outputText}'`, 'success');
-      } else {
-        outputText = text;
-      }
+    // Если есть текущая фраза, сохраняем её в историю
+    if (subtitleDB.currentPhrase) {
+      subtitleDB.phraseHistory.push({
+        text: subtitleDB.currentPhrase,
+        startTime: subtitleDB.lastPhraseStart,
+        endTime: subtitleDB.lastUpdateTime
+      });
     }
     
-    // Reset the sentence end detector
-    sentenceEndDetected = false;
+    // Начинаем новую фразу
+    subtitleDB.currentPhrase = cleanedDiff;
+    subtitleDB.lastPhraseStart = updateTime;
+    
+    // Выводим разделитель для новых фраз
+    console.log('');
+    console.log('%c▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ НОВАЯ ФРАЗА ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃', 'color: red; font-weight: bold; font-size: 16px; background-color: yellow;');
+    console.log('');
+    console.log(subtitleDB.currentPhrase);
   }
   
-  // Output the text
-  console.log(outputText);
-  
-  // Update last displayed text
-  lastDisplayedText = text;
+  // Обновляем состояние
+  subtitleDB.fullText = currentText;
+  subtitleDB.lastUpdateTime = updateTime;
 }
 
-// Initialize the extension
+// Инициализация расширения
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
 } else {
